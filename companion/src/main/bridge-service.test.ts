@@ -90,7 +90,11 @@ vi.mock('./audio-helper', async (importOriginal) => {
     playBridgeHapticsTestPattern: audioHelperMock.playBridgeHapticsTestPattern,
     playBridgeSpeakerTestTone: audioHelperMock.playBridgeSpeakerTestTone,
     listBridges: audioHelperMock.listBridges,
-    setAudioHelperBridgeTarget: audioHelperMock.setAudioHelperBridgeTarget
+    setAudioHelperBridgeTarget: audioHelperMock.setAudioHelperBridgeTarget,
+    GameBarMonitor: class extends EventEmitter {
+      start(): void {}
+      stop(): void {}
+    }
   };
 });
 
@@ -2261,6 +2265,55 @@ describe('BridgeService', () => {
     expect(command?.[7]).toBe(COMMAND_ID.SET_HOST_PERSONA);
     expect(command?.[9]).toBe(1);
     expect(snapshot.settings.hostPersonaMode).toBe('xbox');
+  });
+
+  it('temporarily switches to the Xbox persona while Game Bar is open', async () => {
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    try {
+      const service = serviceFixture();
+      const device = new MockHidDevice();
+      device.status = statusReport({
+        controllerConnected: false,
+        hostPersonaMode: 'dualsense',
+        supportedHostPersonaModesMask: 0x07
+      });
+      hidMock.state.devicesList = [companionDeviceInfo()];
+      hidMock.state.openDevices.set('companion-path', device);
+      const gameBar = (service as unknown as { gameBarMonitor: EventEmitter }).gameBarMonitor;
+
+      await poll(service);
+      await service.setGameBarXboxPersonaEnabled(true);
+      gameBar.emit('visibility', true);
+      await flushImmediate();
+
+      let command = device.sentReports.at(-1);
+      expect(command?.[7]).toBe(COMMAND_ID.SET_HOST_PERSONA);
+      expect(command?.[9]).toBe(1);
+      expect(service.getSnapshot().settings.hostPersonaMode).toBe('dualsense');
+
+      device.status = statusReport({
+        controllerConnected: false,
+        hostPersonaMode: 'xbox',
+        supportedHostPersonaModesMask: 0x07
+      });
+      await poll(service);
+      const sentWhileOpen = device.sentReports.length;
+
+      gameBar.emit('visibility', false);
+      await flushImmediate();
+      expect(device.sentReports.length).toBe(sentWhileOpen);
+
+      nowSpy.mockReturnValue(1_002_000);
+      await poll(service);
+      await flushImmediate();
+
+      command = device.sentReports.at(-1);
+      expect(command?.[7]).toBe(COMMAND_ID.SET_HOST_PERSONA);
+      expect(command?.[9]).toBe(0);
+      expect(service.getSnapshot().settings.hostPersonaMode).toBe('dualsense');
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it('sends and stores DS4 host persona settings', async () => {
