@@ -1,4 +1,7 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using HidSharp;
+using Microsoft.Win32.SafeHandles;
 using Windows.Gaming.Input;
 using Windows.UI.Input.Preview.Injection;
 
@@ -12,12 +15,30 @@ sealed class VirtualGamepad : IDisposable
     private static readonly int[] DualSenseProductIds = [0x0CE6, 0x0DF2];
     private const byte DualSenseUsbInputReportId = 0x01;
     private const int DualSenseUsbInputReportMinLength = 11;
-    private const int ReadTimeoutMilliseconds = 500;
+    private const int MinGamepadInputReportLength = 64;
+    private const uint GenericDesktopGamePadUsage = 0x00010005;
+    private const uint GenericDesktopJoystickUsage = 0x00010004;
+    private const uint GenericRead = 0x80000000;
+    private const uint FileShareRead = 0x00000001;
+    private const uint FileShareWrite = 0x00000002;
+    private const uint OpenExisting = 3;
+    private const uint FileFlagOverlapped = 0x40000000;
 
     private InputInjector? injector;
-    private HidStream? stream;
+    private FileStream? stream;
+    private CancellationTokenSource? readCancellation;
     private Thread? readerThread;
     private volatile bool running;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
 
     public bool Connect(out string detail)
     {
@@ -27,8 +48,8 @@ sealed class VirtualGamepad : IDisposable
             return true;
         }
 
-        var device = FindBridgeDualSense();
-        if (device is null)
+        var candidates = FindBridgeDualSenseGamepads();
+        if (candidates.Count == 0)
         {
             // Only the DualSense and DualSense Edge personas expose this
             // report layout. The DS4 persona falls back to a persona switch.
@@ -36,35 +57,49 @@ sealed class VirtualGamepad : IDisposable
             return false;
         }
 
+        FileStream? opened = null;
+        HidDevice? device = null;
+        var openErrors = new List<string>();
+        foreach (var candidate in candidates)
+        {
+            if (TryOpenForRead(candidate, out opened, out var error))
+            {
+                device = candidate;
+                break;
+            }
+            openErrors.Add(error);
+        }
+        if (opened is null || device is null)
+        {
+            detail = $"hid-open-failed {string.Join("; ", openErrors)}";
+            return false;
+        }
+
         try
         {
             injector = InputInjector.TryCreate();
-            if (injector is null)
-            {
-                detail = "input-injection-unavailable";
-                return false;
-            }
-            injector.InitializeGamepadInjection();
+            injector?.InitializeGamepadInjection();
         }
         catch (Exception error)
         {
             injector = null;
+            opened.Dispose();
             detail = $"input-injection-failed {error.GetType().Name}: {error.Message}";
             return false;
         }
-
-        if (!device.TryOpen(out var opened))
+        if (injector is null)
         {
-            ReleaseInjector();
-            detail = "hid-open-failed";
+            opened.Dispose();
+            detail = "input-injection-unavailable";
             return false;
         }
 
         stream = opened;
-        stream.ReadTimeout = ReadTimeoutMilliseconds;
+        readCancellation = new CancellationTokenSource();
         running = true;
-        var reportLength = Math.Max(device.GetMaxInputReportLength(), 64);
-        readerThread = new Thread(() => ReadLoop(opened, reportLength))
+        var reportLength = Math.Max(SafeMaxInputReportLength(device), MinGamepadInputReportLength);
+        var token = readCancellation.Token;
+        readerThread = new Thread(() => ReadLoop(opened, reportLength, token))
         {
             IsBackground = true,
             Name = "VirtualGamepadReader"
@@ -82,6 +117,7 @@ sealed class VirtualGamepad : IDisposable
         }
 
         running = false;
+        readCancellation?.Cancel();
         try
         {
             stream?.Dispose();
@@ -92,6 +128,8 @@ sealed class VirtualGamepad : IDisposable
         stream = null;
         readerThread?.Join(1000);
         readerThread = null;
+        readCancellation?.Dispose();
+        readCancellation = null;
         ReleaseInjector();
     }
 
@@ -118,7 +156,7 @@ sealed class VirtualGamepad : IDisposable
         }
     }
 
-    private void ReadLoop(HidStream source, int reportLength)
+    private void ReadLoop(FileStream source, int reportLength, CancellationToken token)
     {
         var buffer = new byte[reportLength];
         while (running)
@@ -126,11 +164,11 @@ sealed class VirtualGamepad : IDisposable
             int count;
             try
             {
-                count = source.Read(buffer, 0, buffer.Length);
+                count = source.ReadAsync(buffer, 0, buffer.Length, token).GetAwaiter().GetResult();
             }
-            catch (TimeoutException)
+            catch (OperationCanceledException)
             {
-                continue;
+                break;
             }
             catch (Exception error)
             {
@@ -208,26 +246,98 @@ sealed class VirtualGamepad : IDisposable
         return Math.Clamp((value - 128) / 127.0, -1.0, 1.0);
     }
 
-    private static HidDevice? FindBridgeDualSense()
+    // Opens the gamepad for reading only, sharing read and write, so a game,
+    // Steam, or the companion holding the same interface does not block it.
+    private static bool TryOpenForRead(HidDevice device, out FileStream? stream, out string error)
+    {
+        stream = null;
+        var handle = CreateFile(
+            device.DevicePath,
+            GenericRead,
+            FileShareRead | FileShareWrite,
+            IntPtr.Zero,
+            OpenExisting,
+            FileFlagOverlapped,
+            IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var code = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            error = $"win32={code} ({new Win32Exception(code).Message})";
+            return false;
+        }
+
+        try
+        {
+            // bufferSize 0 passes reads straight to the device, as HID requires.
+            stream = new FileStream(handle, FileAccess.Read, 0, isAsync: true);
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            handle.Dispose();
+            error = $"{exception.GetType().Name}: {exception.Message}";
+            return false;
+        }
+    }
+
+    private static List<HidDevice> FindBridgeDualSenseGamepads()
     {
         var bridgeContainers = EndpointManager.TargetBridgeContainer is Guid target
             ? new HashSet<Guid> { target }
             : BridgeDeviceIdentity.GetBridgeContainerIds();
 
+        var devices = new List<HidDevice>();
         foreach (var device in DeviceList.Local.GetHidDevices(SonyVendorId))
         {
             if (!DualSenseProductIds.Contains(device.ProductID))
             {
                 continue;
             }
-            // Only the bridge's own interface: a DualSense connected to the PC
-            // directly shares the same IDs.
+            // The bridge also exposes a keyboard with the same IDs, which
+            // Windows does not let other processes open, and a DualSense
+            // connected to the PC directly shares the IDs too.
+            if (!IsGamepadInterface(device))
+            {
+                continue;
+            }
             if (BridgeDeviceIdentity.TryGetContainerIdForInterfacePath(device.DevicePath, out var container)
                 && bridgeContainers.Contains(container))
             {
-                return device;
+                devices.Add(device);
             }
         }
-        return null;
+        return devices;
+    }
+
+    private static bool IsGamepadInterface(HidDevice device)
+    {
+        if (SafeMaxInputReportLength(device) < MinGamepadInputReportLength)
+        {
+            return false;
+        }
+        try
+        {
+            return device.GetReportDescriptor().DeviceItems.Any((item) => item.Usages.GetAllValues().Any(
+                (usage) => usage == GenericDesktopGamePadUsage || usage == GenericDesktopJoystickUsage));
+        }
+        catch
+        {
+            // The report length already rules out the keyboard interface.
+            return true;
+        }
+    }
+
+    private static int SafeMaxInputReportLength(HidDevice device)
+    {
+        try
+        {
+            return device.GetMaxInputReportLength();
+        }
+        catch
+        {
+            return 0;
+        }
     }
 }
