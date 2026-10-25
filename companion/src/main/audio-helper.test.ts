@@ -55,6 +55,7 @@ import {
   AudioHapticsSessionMonitor,
   getDefaultRenderEndpointStatus,
   MicKeepaliveEngine,
+  parseGameBarMonitorLine,
   playBridgeHapticsTestPattern,
   playBridgeSpeakerTestTone,
   setAudioHelperBridgeTarget,
@@ -283,5 +284,27 @@ describe('audio haptics session listing', () => {
     expect(childProcessMock.spawn.mock.calls[0]![1]).toEqual(['--monitor-audio-sessions']);
 
     await monitor.stop();
+  });
+});
+
+describe('Game Bar monitor output', () => {
+  it('reports a connected virtual gamepad only while Game Bar is visible', () => {
+    expect(parseGameBarMonitorLine(
+      '{"visible":true,"source":"api","trigger":"api-event","virtualPad":"connected","virtualPadDetail":"pid=0x0CE6"}'
+    )).toEqual({ visible: true, virtualGamepadConnected: true, virtualGamepadDetail: 'pid=0x0CE6' });
+    expect(parseGameBarMonitorLine(
+      '{"visible":false,"source":"none","trigger":"foreground-event","virtualPad":"disconnected"}'
+    )).toEqual({ visible: false, virtualGamepadConnected: false, virtualGamepadDetail: null });
+  });
+
+  it('treats an unavailable virtual gamepad as needing the persona fallback', () => {
+    expect(parseGameBarMonitorLine(
+      '{"visible":true,"source":"foreground","virtualPad":"unavailable","virtualPadDetail":"no-bridge-dualsense-interface"}'
+    )).toEqual({ visible: true, virtualGamepadConnected: false, virtualGamepadDetail: 'no-bridge-dualsense-interface' });
+  });
+
+  it('ignores lines that are not visibility reports', () => {
+    expect(parseGameBarMonitorLine('status: started')).toBeNull();
+    expect(parseGameBarMonitorLine('{"type":"snapshot"}')).toBeNull();
   });
 });

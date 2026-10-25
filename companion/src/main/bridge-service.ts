@@ -88,6 +88,7 @@ import type {
 import {
   AudioHapticsSessionMonitor,
   GameBarMonitor,
+  type GameBarVisibility,
   MicKeepaliveEngine,
   SystemAudioHapticsEngine,
   playBridgeHapticsTestPattern,
@@ -1251,6 +1252,9 @@ export class BridgeService extends EventEmitter {
   private readonly audioHapticsSessionMonitor = new AudioHapticsSessionMonitor();
   private readonly gameBarMonitor = new GameBarMonitor();
   private gameBarVisible = false;
+  // While the helper's virtual gamepad is attached, Game Bar is navigable
+  // without touching the bridge, so no persona switch is needed.
+  private gameBarVirtualGamepadConnected = false;
   private gameBarHiddenSince = 0;
   // Persona to restore once Game Bar closes; set while the temporary Xbox
   // persona is requested or active.
@@ -1366,13 +1370,17 @@ export class BridgeService extends EventEmitter {
         this.appendAudioDebugLines([`[GameBar] ${line}`]);
       }
     });
-    this.gameBarMonitor.on('visibility', (visible: boolean) => {
-      this.gameBarVisible = visible;
-      if (!visible) {
+    this.gameBarMonitor.on('visibility', (visibility: GameBarVisibility) => {
+      this.gameBarVisible = visibility.visible;
+      this.gameBarVirtualGamepadConnected = visibility.virtualGamepadConnected;
+      if (!visibility.visible) {
         this.gameBarHiddenSince = Date.now();
         this.gameBarPersonaSuppressed = false;
       }
-      this.appendAudioDebugLines([`[GameBar] visible=${visible}`]);
+      this.appendAudioDebugLines([
+        `[GameBar] visible=${visibility.visible} virtualGamepad=${visibility.virtualGamepadConnected}`
+          + (visibility.virtualGamepadDetail ? ` detail=${visibility.virtualGamepadDetail}` : '')
+      ]);
       void this.reconcileGameBarPersona();
     });
     this.micKeepaliveEngine.on('error', (error: Error) => {
@@ -3233,9 +3241,11 @@ export class BridgeService extends EventEmitter {
     return this.gameBarPersonaRestoreMode !== null ? 'xbox' : settings.hostPersonaMode;
   }
 
-  // Switches to the Xbox persona while Game Bar is open, because Game Bar only
-  // accepts XInput controllers for navigation, then restores the previous
-  // persona once it closes. Neither switch is saved to settings.
+  // Game Bar only accepts Xbox-style gamepads for navigation. The helper first
+  // tries a temporary built-in virtual gamepad, which keeps the bridge's
+  // DualSense attached to the game. Only when that is unavailable does this
+  // switch the bridge to the Xbox persona while Game Bar is open, restoring the
+  // previous persona once it closes. Neither switch is saved to settings.
   private async reconcileGameBarPersona(): Promise<void> {
     if (this.gameBarPersonaInFlight || this.snapshot.state !== 'connected') {
       return;
@@ -3248,6 +3258,7 @@ export class BridgeService extends EventEmitter {
       if (
         enabled
         && this.gameBarVisible
+        && !this.gameBarVirtualGamepadConnected
         && !this.gameBarPersonaSuppressed
         && current !== 'xbox'
         && this.snapshot.status?.supportedHostPersonaModes.includes('xbox')

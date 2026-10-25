@@ -10488,7 +10488,7 @@ export function App() {
                 <div className="settings-menu-row">
                   <div className="settings-menu-copy">
                     <strong>Game Bar Controller Compatibility</strong>
-                    <span>Switch to Xbox mode while Xbox Game Bar is open so the controller can navigate it, then switch back when it closes.</span>
+                    <span>Add a temporary virtual Xbox-style gamepad while Xbox Game Bar is open so the controller can navigate it, without disconnecting the DualSense from the game. Falls back to switching to Xbox mode when that is not possible.</span>
                   </div>
                   <button
                     type="button"

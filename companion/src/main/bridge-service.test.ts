@@ -2267,6 +2267,33 @@ describe('BridgeService', () => {
     expect(snapshot.settings.hostPersonaMode).toBe('xbox');
   });
 
+  it('keeps the bridge persona when the virtual gamepad covers Game Bar', async () => {
+    const service = serviceFixture();
+    const device = new MockHidDevice();
+    device.status = statusReport({
+      controllerConnected: false,
+      hostPersonaMode: 'dualsense',
+      supportedHostPersonaModesMask: 0x07
+    });
+    hidMock.state.devicesList = [companionDeviceInfo()];
+    hidMock.state.openDevices.set('companion-path', device);
+    const gameBar = (service as unknown as { gameBarMonitor: EventEmitter }).gameBarMonitor;
+
+    await poll(service);
+    await service.setGameBarXboxPersonaEnabled(true);
+    const sentBefore = device.sentReports.length;
+    gameBar.emit('visibility', { visible: true, virtualGamepadConnected: true, virtualGamepadDetail: 'pid=0x0CE6' });
+    await flushImmediate();
+    await poll(service);
+    await flushImmediate();
+
+    const personaCommands = device.sentReports
+      .slice(sentBefore)
+      .filter((report) => report[7] === COMMAND_ID.SET_HOST_PERSONA);
+    expect(personaCommands).toEqual([]);
+    expect(service.getSnapshot().settings.hostPersonaMode).toBe('dualsense');
+  });
+
   it('temporarily switches to the Xbox persona while Game Bar is open', async () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
     try {
@@ -2295,7 +2322,7 @@ describe('BridgeService', () => {
 
       await poll(service);
       await service.setGameBarXboxPersonaEnabled(true);
-      gameBar.emit('visibility', true);
+      gameBar.emit('visibility', { visible: true, virtualGamepadConnected: false, virtualGamepadDetail: 'no-bridge-dualsense-interface' });
       await vi.waitFor(() => expect(lastPersonaCommand()).toBe(1));
       expect(service.getSnapshot().settings.hostPersonaMode).toBe('dualsense');
 
@@ -2307,7 +2334,7 @@ describe('BridgeService', () => {
       await poll(service);
       const sentWhileOpen = device.sentReports.length;
 
-      gameBar.emit('visibility', false);
+      gameBar.emit('visibility', { visible: false, virtualGamepadConnected: false, virtualGamepadDetail: null });
       await flushImmediate();
       expect(device.sentReports.length).toBe(sentWhileOpen);
 

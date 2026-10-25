@@ -493,16 +493,24 @@ export class AudioHapticsSessionMonitor extends EventEmitter {
 
 const GAME_BAR_MONITOR_RESTART_DELAY_MS = 5000;
 
+export type GameBarVisibility = {
+  visible: boolean;
+  // True while the helper's built-in virtual gamepad is attached.
+  virtualGamepadConnected: boolean;
+  virtualGamepadDetail: string | null;
+};
+
 // Watches Xbox Game Bar visibility through the helper's --monitor-game-bar
-// mode. Emits 'visibility' (boolean) on every change and restarts the helper
-// if it exits while the monitor is wanted.
+// mode, with --virtual-gamepad so the helper adds a temporary virtual gamepad
+// while Game Bar is open. Emits 'visibility' (GameBarVisibility) on every
+// change and restarts the helper if it exits while the monitor is wanted.
 export class GameBarMonitor extends EventEmitter {
   private process: ChildProcessWithoutNullStreams | null = null;
   private wanted = false;
   private restartTimer: NodeJS.Timeout | null = null;
   private stdoutBuffer = '';
   private stderrBuffer = '';
-  private visible = false;
+  private visibility: GameBarVisibility = HIDDEN_GAME_BAR;
 
   start(): void {
     if (this.wanted) {
@@ -529,17 +537,13 @@ export class GameBarMonitor extends EventEmitter {
       }
       helper.kill();
     }
-    this.setVisible(false);
-  }
-
-  isVisible(): boolean {
-    return this.visible;
+    this.setVisibility(HIDDEN_GAME_BAR);
   }
 
   private spawnHelper(): void {
     let helper: ChildProcessWithoutNullStreams;
     try {
-      helper = spawn(resolveHelperPath(), ['--monitor-game-bar'], {
+      helper = spawn(resolveHelperPath(), ['--monitor-game-bar', '--virtual-gamepad', ...bridgeTargetArgs()], {
         windowsHide: true,
         stdio: ['pipe', 'pipe', 'pipe']
       });
@@ -565,7 +569,7 @@ export class GameBarMonitor extends EventEmitter {
         return;
       }
       this.process = null;
-      this.setVisible(false);
+      this.setVisibility(HIDDEN_GAME_BAR);
       this.emit('status', `game bar monitor exited (${signal ?? code ?? 'unknown'})`);
       this.scheduleRestart();
     });
@@ -583,12 +587,15 @@ export class GameBarMonitor extends EventEmitter {
     }, GAME_BAR_MONITOR_RESTART_DELAY_MS);
   }
 
-  private setVisible(visible: boolean): void {
-    if (this.visible === visible) {
+  private setVisibility(visibility: GameBarVisibility): void {
+    if (
+      this.visibility.visible === visibility.visible
+      && this.visibility.virtualGamepadConnected === visibility.virtualGamepadConnected
+    ) {
       return;
     }
-    this.visible = visible;
-    this.emit('visibility', visible);
+    this.visibility = visibility;
+    this.emit('visibility', { ...visibility });
   }
 
   private processStdout(chunk: Buffer): void {
@@ -596,9 +603,9 @@ export class GameBarMonitor extends EventEmitter {
     const lines = this.stdoutBuffer.split(/\r?\n/);
     this.stdoutBuffer = lines.pop() ?? '';
     for (const line of lines) {
-      const visible = parseGameBarMonitorLine(line);
-      if (visible !== null) {
-        this.setVisible(visible);
+      const visibility = parseGameBarMonitorLine(line);
+      if (visibility) {
+        this.setVisibility(visibility);
       }
     }
   }
@@ -616,13 +623,27 @@ export class GameBarMonitor extends EventEmitter {
   }
 }
 
-export function parseGameBarMonitorLine(raw: string): boolean | null {
+const HIDDEN_GAME_BAR: GameBarVisibility = {
+  visible: false,
+  virtualGamepadConnected: false,
+  virtualGamepadDetail: null
+};
+
+export function parseGameBarMonitorLine(raw: string): GameBarVisibility | null {
+  let parsed: { visible?: unknown; virtualPad?: unknown; virtualPadDetail?: unknown } | null;
   try {
-    const parsed = JSON.parse(raw) as { visible?: unknown } | null;
-    return parsed && typeof parsed.visible === 'boolean' ? parsed.visible : null;
+    parsed = JSON.parse(raw);
   } catch {
     return null;
   }
+  if (!parsed || typeof parsed.visible !== 'boolean') {
+    return null;
+  }
+  return {
+    visible: parsed.visible,
+    virtualGamepadConnected: parsed.visible && parsed.virtualPad === 'connected',
+    virtualGamepadDetail: typeof parsed.virtualPadDetail === 'string' ? parsed.virtualPadDetail : null
+  };
 }
 
 function normalizeSpeakerVolumePercent(percent: number): number {

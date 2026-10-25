@@ -56,7 +56,7 @@ if (options.PlayTestHaptics)
 }
 if (options.MonitorGameBar)
 {
-    await new GameBarMonitor().RunAsync();
+    await new GameBarMonitor(options.VirtualGamepad).RunAsync();
     return;
 }
 if (options.MonitorAudioSessions)
@@ -2779,6 +2779,7 @@ sealed record HelperOptions(
 {
     public bool ListBridges { get; init; }
     public bool MonitorGameBar { get; init; }
+    public bool VirtualGamepad { get; init; }
     public string? CompanionDevicePath { get; init; }
     public Guid? BridgeContainer { get; init; }
 
@@ -2809,6 +2810,7 @@ sealed record HelperOptions(
         var listDevices = false;
         var monitorAudioSessions = false;
         var monitorGameBar = false;
+        var virtualGamepad = false;
         string? resolveIconDataUrlPath = null;
         var companionTransportServer = false;
         var listBridges = false;
@@ -2948,6 +2950,9 @@ sealed record HelperOptions(
                 case "--monitor-game-bar":
                     monitorGameBar = true;
                     break;
+                case "--virtual-gamepad":
+                    virtualGamepad = true;
+                    break;
                 case "--resolve-icon-data-url" when index + 1 < args.Length:
                     resolveIconDataUrlPath = args[++index];
                     break;
@@ -3038,6 +3043,7 @@ sealed record HelperOptions(
         {
             ListBridges = listBridges,
             MonitorGameBar = monitorGameBar,
+            VirtualGamepad = virtualGamepad,
             CompanionDevicePath = companionDevicePath,
             BridgeContainer = bridgeContainer
         };
