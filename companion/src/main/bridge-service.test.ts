@@ -2279,16 +2279,24 @@ describe('BridgeService', () => {
       });
       hidMock.state.devicesList = [companionDeviceInfo()];
       hidMock.state.openDevices.set('companion-path', device);
-      const gameBar = (service as unknown as { gameBarMonitor: EventEmitter }).gameBarMonitor;
+      const internals = service as unknown as {
+        gameBarMonitor: EventEmitter;
+        getDefaultRenderEndpointStatus: () => Promise<{ deviceName: string; isBridgeEndpoint: boolean }>;
+      };
+      internals.getDefaultRenderEndpointStatus = vi.fn(async () => ({
+        deviceName: 'Speakers',
+        isBridgeEndpoint: false
+      }));
+      const gameBar = internals.gameBarMonitor;
+      const lastPersonaCommand = () => {
+        const command = device.sentReports.at(-1);
+        return command?.[7] === COMMAND_ID.SET_HOST_PERSONA ? command[9] : null;
+      };
 
       await poll(service);
       await service.setGameBarXboxPersonaEnabled(true);
       gameBar.emit('visibility', true);
-      await flushImmediate();
-
-      let command = device.sentReports.at(-1);
-      expect(command?.[7]).toBe(COMMAND_ID.SET_HOST_PERSONA);
-      expect(command?.[9]).toBe(1);
+      await vi.waitFor(() => expect(lastPersonaCommand()).toBe(1));
       expect(service.getSnapshot().settings.hostPersonaMode).toBe('dualsense');
 
       device.status = statusReport({
@@ -2305,11 +2313,7 @@ describe('BridgeService', () => {
 
       nowSpy.mockReturnValue(1_002_000);
       await poll(service);
-      await flushImmediate();
-
-      command = device.sentReports.at(-1);
-      expect(command?.[7]).toBe(COMMAND_ID.SET_HOST_PERSONA);
-      expect(command?.[9]).toBe(0);
+      await vi.waitFor(() => expect(lastPersonaCommand()).toBe(0));
       expect(service.getSnapshot().settings.hostPersonaMode).toBe('dualsense');
     } finally {
       nowSpy.mockRestore();
